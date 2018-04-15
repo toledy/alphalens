@@ -698,7 +698,7 @@ def plot_monthly_ic_heatmap(mean_monthly_ic, ax=None):
             annot_kws={"size": 7},
             linewidths=0.01,
             linecolor='white',
-            cmap=cm.coolwarm,
+            cmap=cm.coolwarm_r,
             cbar=False,
             ax=a)
         a.set(ylabel='', xlabel='')
@@ -777,7 +777,7 @@ def plot_cumulative_returns_by_quantile(quantile_returns,
     ret_wide = quantile_returns.unstack('factor_quantile')
 
     cum_ret = ret_wide.apply(perf.cumulative_returns, period=period)
-    cum_ret = cum_ret.loc[:, ::-1]
+    cum_ret = cum_ret.loc[:, ::-1]  # we want negative quantiles as 'red'
 
     cum_ret.plot(lw=2, ax=ax, cmap=cm.coolwarm)
     ax.legend()
@@ -827,6 +827,7 @@ def plot_quantile_average_cumulative_return(avg_cumulative_returns,
     avg_cumulative_returns = avg_cumulative_returns.multiply(DECIMAL_TO_BPS)
     quantiles = len(avg_cumulative_returns.index.levels[0].unique())
     palette = [cm.coolwarm(i) for i in np.linspace(0, 1, quantiles)]
+    palette = palette[::-1]  # we want negative quantiles as 'red'
 
     if by_quantile:
 
@@ -848,7 +849,7 @@ def plot_quantile_average_cumulative_return(avg_cumulative_returns,
             if std_bar:
                 std = q_ret.loc[(quantile, 'std')]
                 ax[i].errorbar(std.index, mean, yerr=std,
-                               fmt=None, ecolor=palette[i], label=None)
+                               fmt='none', ecolor=palette[i], label='none')
 
             ax[i].axvline(x=0, color='k', linestyle='--')
             ax[i].legend()
@@ -870,7 +871,7 @@ def plot_quantile_average_cumulative_return(avg_cumulative_returns,
             if std_bar:
                 std = q_ret.loc[(quantile, 'std')]
                 ax.errorbar(std.index, mean, yerr=std,
-                            fmt=None, ecolor=palette[i], label='none')
+                            fmt='none', ecolor=palette[i], label='none')
             i += 1
 
         ax.axvline(x=0, color='k', linestyle='--')
