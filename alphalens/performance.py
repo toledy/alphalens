@@ -335,9 +335,9 @@ def factor_alpha_beta(factor_data,
 
 def cumulative_returns(returns, period, freq=None):
     """
-    Builds cumulative returns from 'period' returns. This function simulate the
-    cumulative effect that a series of gains or losses (the 'retuns') have on
-    an original amount of capital over a period of time.
+    Builds cumulative returns from 'period' returns. This function simulates
+    the cumulative effect that a series of gains or losses (the 'returns')
+    have on an original amount of capital over a period of time.
 
     if F is the frequency at which returns are computed (e.g. 1 day if
     'returns' contains daily values) and N is the period for which the retuns
@@ -378,6 +378,12 @@ def cumulative_returns(returns, period, freq=None):
     Returns
     -------
     Cumulative returns series : pd.Series
+        Example:
+            2015-07-16 09:30:00  -0.012143
+            2015-07-16 12:30:00   0.012546
+            2015-07-17 09:30:00   0.045350
+            2015-07-17 12:30:00   0.065897
+            2015-07-20 09:30:00   0.030957
     """
 
     if not isinstance(period, pd.Timedelta):
@@ -403,7 +409,7 @@ def cumulative_returns(returns, period, freq=None):
 
     #
     # Build N sub_returns from the single returns Series. Each sub_retuns
-    # stream will contain non overlapping retuns.
+    # stream will contain non-overlapping returns.
     # In the next step we'll compute the portfolio returns averaging the
     # returns happening on those overlapping returns streams
     #
@@ -434,7 +440,7 @@ def cumulative_returns(returns, period, freq=None):
         #
         # compute intermediate returns values for each index in subret that are
         # in between the timestaps at which the factors are computed and the
-        # timestamps at which the 'period' actually returns happen
+        # timestamps at which the 'period' returns actually happen
         #
         for pret_idx in reversed(sub_index):
 
@@ -470,9 +476,7 @@ def cumulative_returns(returns, period, freq=None):
 
     #
     # Compute portfolio cumulative returns averaging the returns happening on
-    # overlapping returns streams. Please note that the below algorithm keeps
-    # into consideration the scenario where a factor is not computed at a fixed
-    # frequency (e.g. every day) and consequently the returns appears randomly
+    # overlapping returns streams.
     #
     sub_portfolios = pd.concat(sub_returns, axis=1)
     portfolio = pd.Series(index=sub_portfolios.index)
@@ -518,6 +522,13 @@ def positions(weights, period, freq=None):
     -------
     pd.DataFrame
         Assets positions series, datetime on index, assets on columns.
+        Example:
+            index                 'AAPL'         'MSFT'          cash
+            2004-01-09 10:30:00   13939.3800     -14012.9930     711.5585
+            2004-01-09 15:30:00       0.00       -16012.9930     411.5585
+            2004-01-12 10:30:00   14492.6300     -14624.8700       0.0
+            2004-01-12 15:30:00   14874.5400     -15841.2500       0.0
+            2004-01-13 10:30:00   -13853.2800    13653.6400      -43.6375
     """
 
     weights = weights.unstack()
@@ -627,9 +638,7 @@ def mean_return_by_quantile(factor_data,
     else:
         factor_data = factor_data.copy()
 
-    grouper = ['factor_quantile']
-    if by_date:
-        grouper.append(factor_data.index.get_level_values('date'))
+    grouper = ['factor_quantile', factor_data.index.get_level_values('date')]
 
     if by_group:
         grouper.append('group')
@@ -639,6 +648,14 @@ def mean_return_by_quantile(factor_data,
         .agg(['mean', 'std', 'count'])
 
     mean_ret = group_stats.T.xs('mean', level=1).T
+
+    if not by_date:
+        grouper = [mean_ret.index.get_level_values('factor_quantile')]
+        if by_group:
+            grouper.append(mean_ret.index.get_level_values('group'))
+        group_stats = mean_ret.groupby(grouper)\
+            .agg(['mean', 'std', 'count'])
+        mean_ret = group_stats.T.xs('mean', level=1).T
 
     std_error_ret = group_stats.T.xs('std', level=1).T \
         / np.sqrt(group_stats.T.xs('count', level=1).T)
@@ -667,7 +684,7 @@ def compute_mean_returns_spread(mean_returns,
     lower_quant : int
         Quantile of mean return we wish to subtract
         from upper quantile mean return.
-    std_err : pd.DataFrame
+    std_err : pd.DataFrame, optional
         Period wise standard error in mean return by quantile.
         Takes the same form as mean_returns.
 
@@ -677,15 +694,19 @@ def compute_mean_returns_spread(mean_returns,
         Period wise difference in quantile returns.
     joint_std_err : pd.Series
         Period wise standard error of the difference in quantile returns.
+        if std_err is None, this will be None
     """
 
     mean_return_difference = mean_returns.xs(upper_quant,
                                              level='factor_quantile') \
         - mean_returns.xs(lower_quant, level='factor_quantile')
 
-    std1 = std_err.xs(upper_quant, level='factor_quantile')
-    std2 = std_err.xs(lower_quant, level='factor_quantile')
-    joint_std_err = np.sqrt(std1**2 + std2**2)
+    if std_err is None:
+        joint_std_err = None
+    else:
+        std1 = std_err.xs(upper_quant, level='factor_quantile')
+        std2 = std_err.xs(lower_quant, level='factor_quantile')
+        joint_std_err = np.sqrt(std1**2 + std2**2)
 
     return mean_return_difference, joint_std_err
 
@@ -716,14 +737,15 @@ def quantile_turnover(quantile_factor, quantile, period=1):
         lambda x: set(x.index.get_level_values('asset')))
 
     if isinstance(period, int):
-        shift = period
+        name_shifted = quant_name_sets.shift(period)
     else:
-        # find the frequency at which the factor is computed
-        idx = quant_name_sets.index
-        freq = min([idx[i] - idx[i-1] for i in range(1, min(10, len(idx)))])
-        shift = int(pd.Timedelta(period) / freq)
+        shifted_idx = utils.add_custom_calendar_timedelta(
+                quant_name_sets.index, -pd.Timedelta(period),
+                quantile_factor.index.levels[0].freq)
+        name_shifted = quant_name_sets.reindex(shifted_idx)
+        name_shifted.index = quant_name_sets.index
 
-    new_names = (quant_name_sets - quant_name_sets.shift(shift)).dropna()
+    new_names = (quant_name_sets - name_shifted).dropna()
     quant_turnover = new_names.apply(
         lambda x: len(x)) / quant_name_sets.apply(lambda x: len(x))
     quant_turnover.name = quantile
@@ -768,15 +790,15 @@ def factor_rank_autocorrelation(factor_data, period=1):
                                                   values='factor')
 
     if isinstance(period, int):
-        shift = period
+        asset_shifted = asset_factor_rank.shift(period)
     else:
-        # find the frequency at which the factor is computed
-        idx = asset_factor_rank.index
-        freq = min([idx[i] - idx[i-1] for i in range(1, min(10, len(idx)))])
-        shift = int(pd.Timedelta(period) / freq)
+        shifted_idx = utils.add_custom_calendar_timedelta(
+                asset_factor_rank.index, -pd.Timedelta(period),
+                factor_data.index.levels[0].freq)
+        asset_shifted = asset_factor_rank.reindex(shifted_idx)
+        asset_shifted.index = asset_factor_rank.index
 
-    autocorr = asset_factor_rank.corrwith(asset_factor_rank.shift(shift),
-                                          axis=1)
+    autocorr = asset_factor_rank.corrwith(asset_shifted, axis=1)
     autocorr.name = period
     return autocorr
 
@@ -1041,6 +1063,12 @@ def factor_cumulative_returns(factor_data,
     Returns
     -------
     Cumulative returns series : pd.Series
+        Example:
+            2015-07-16 09:30:00  -0.012143
+            2015-07-16 12:30:00   0.012546
+            2015-07-17 09:30:00   0.045350
+            2015-07-17 12:30:00   0.065897
+            2015-07-20 09:30:00   0.030957
     """
     fwd_ret_cols = utils.get_forward_returns_columns(factor_data.columns)
 
@@ -1106,6 +1134,13 @@ def factor_positions(factor_data,
     -------
     assets positions : pd.DataFrame
         Assets positions series, datetime on index, assets on columns.
+        Example:
+            index                 'AAPL'         'MSFT'          cash
+            2004-01-09 10:30:00   13939.3800     -14012.9930     711.5585
+            2004-01-09 15:30:00       0.00       -16012.9930     411.5585
+            2004-01-12 10:30:00   14492.6300     -14624.8700       0.0
+            2004-01-12 15:30:00   14874.5400     -15841.2500       0.0
+            2004-01-13 10:30:00   -13853.2800    13653.6400      -43.6375
     """
     fwd_ret_cols = utils.get_forward_returns_columns(factor_data.columns)
 
@@ -1139,10 +1174,6 @@ def create_pyfolio_input(factor_data,
                          groups=None,
                          benchmark_period='1D'):
     """
-
-    WARNING: this API is still in experimental phase and input/output
-             paramenters might change in the future
-
     Simulate a portfolio using the input factor and returns the portfolio
     performance data properly formatted for Pyfolio analysis.
 
@@ -1243,7 +1274,7 @@ def create_pyfolio_input(factor_data,
                                         equal_weight,
                                         quantiles,
                                         groups)
-    cumrets = cumrets.resample('1D').last().dropna()
+    cumrets = cumrets.resample('1D').last().fillna(method='ffill')
     returns = cumrets.pct_change().fillna(0)
 
     #
@@ -1258,7 +1289,7 @@ def create_pyfolio_input(factor_data,
                                  equal_weight,
                                  quantiles,
                                  groups)
-    positions = positions.resample('1D').sum().dropna(how='all')
+    positions = positions.resample('1D').sum().fillna(method='ffill')
     positions = positions.div(positions.abs().sum(axis=1), axis=0).fillna(0)
     positions['cash'] = 1. - positions.sum(axis=1)
 
@@ -1283,7 +1314,8 @@ def create_pyfolio_input(factor_data,
                                                    long_short=False,
                                                    group_neutral=False,
                                                    equal_weight=True)
-        benchmark_rets = benchmark_rets.resample('1D').last()
+        benchmark_rets = benchmark_rets.resample(
+            '1D').last().fillna(method='ffill')
         benchmark_rets = benchmark_rets.pct_change().fillna(0)
         benchmark_rets.name = 'benchmark'
     else:

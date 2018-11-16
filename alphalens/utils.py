@@ -1,5 +1,5 @@
 #
-# Copyright 2017 Quantopian, Inc.
+# Copyright 2018 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,12 +15,10 @@
 
 import pandas as pd
 import numpy as np
-import warnings
 import re
 
 from IPython.display import display
-from functools import wraps
-from pandas.tseries.offsets import CustomBusinessDay
+from pandas.tseries.offsets import CustomBusinessDay, Day, BusinessDay
 from scipy.stats import mode
 
 
@@ -87,7 +85,8 @@ def quantize_factor(factor_data,
                     quantiles=5,
                     bins=None,
                     by_group=False,
-                    no_raise=False):
+                    no_raise=False,
+                    zero_aware=False):
     """
     Computes period wise factor quantiles.
 
@@ -111,11 +110,15 @@ def quantize_factor(factor_data,
         Alternately sequence of bin edges allowing for non-uniform bin width
         e.g. [-4, -2, -0.5, 0, 10]
         Only one of 'quantiles' or 'bins' can be not-None
-    by_group : bool
+    by_group : bool, optional
         If True, compute quantile buckets separately for each group.
     no_raise: bool, optional
         If True, no exceptions are thrown and the values for which the
         exception would have been thrown are set to np.NaN
+    zero_aware : bool, optional
+        If True, compute quantile buckets separately for positive and negative
+        signal values. This is useful if your signal is centered and zero is
+        the separation between long and short signals, respectively.
 
     Returns
     -------
@@ -126,12 +129,30 @@ def quantize_factor(factor_data,
             (quantiles is None and bins is not None)):
         raise ValueError('Either quantiles or bins should be provided')
 
-    def quantile_calc(x, _quantiles, _bins, _no_raise):
+    if zero_aware and not (isinstance(quantiles, int)
+                           or isinstance(bins, int)):
+        msg = ("zero_aware should only be True when quantiles or bins is an"
+               " integer")
+        raise ValueError(msg)
+
+    def quantile_calc(x, _quantiles, _bins, _zero_aware, _no_raise):
         try:
-            if _quantiles is not None and _bins is None:
+            if _quantiles is not None and _bins is None and not _zero_aware:
                 return pd.qcut(x, _quantiles, labels=False) + 1
-            elif _bins is not None and _quantiles is None:
+            elif _quantiles is not None and _bins is None and _zero_aware:
+                pos_quantiles = pd.qcut(x[x >= 0], _quantiles // 2,
+                                        labels=False) + _quantiles // 2 + 1
+                neg_quantiles = pd.qcut(x[x < 0], _quantiles // 2,
+                                        labels=False) + 1
+                return pd.concat([pos_quantiles, neg_quantiles]).sort_index()
+            elif _bins is not None and _quantiles is None and not _zero_aware:
                 return pd.cut(x, _bins, labels=False) + 1
+            elif _bins is not None and _quantiles is None and _zero_aware:
+                pos_bins = pd.cut(x[x >= 0], _bins // 2,
+                                  labels=False) + _bins // 2 + 1
+                neg_bins = pd.cut(x[x < 0], _bins // 2,
+                                  labels=False) + 1
+                return pd.concat([pos_bins, neg_bins]).sort_index()
         except Exception as e:
             if _no_raise:
                 return pd.Series(index=x.index)
@@ -142,7 +163,7 @@ def quantize_factor(factor_data,
         grouper.append('group')
 
     factor_quantile = factor_data.groupby(grouper)['factor'] \
-        .apply(quantile_calc, quantiles, bins, no_raise)
+        .apply(quantile_calc, quantiles, bins, zero_aware, no_raise)
     factor_quantile.name = 'factor_quantile'
 
     return factor_quantile.dropna()
@@ -165,18 +186,30 @@ def infer_trading_calendar(factor_idx, prices_idx):
     """
     full_idx = factor_idx.union(prices_idx)
 
-    # drop days of the week that are not used
-    days_to_keep = []
+    traded_weekdays = []
+    holidays = []
+
     days_of_the_week = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     for day, day_str in enumerate(days_of_the_week):
-        if (full_idx.dayofweek == day).any():
-            days_to_keep.append(day_str)
 
-    days_to_keep = ' '.join(days_to_keep)
+        weekday_mask = (full_idx.dayofweek == day)
 
-    # we currently don't infer holidays, but CustomBusinessDay class supports
-    # custom holidays. So holidays could be inferred too eventually
-    return CustomBusinessDay(weekmask=days_to_keep)
+        # drop days of the week that are not traded at all
+        if not weekday_mask.any():
+            continue
+        traded_weekdays.append(day_str)
+
+        # look for holidays
+        used_weekdays = full_idx[weekday_mask].normalize()
+        all_weekdays = pd.date_range(full_idx.min(), full_idx.max(),
+                                     freq=CustomBusinessDay(weekmask=day_str)
+                                     ).normalize()
+        _holidays = all_weekdays.difference(used_weekdays)
+        _holidays = [timestamp.date() for timestamp in _holidays]
+        holidays.extend(_holidays)
+
+    traded_weekdays = ' '.join(traded_weekdays)
+    return CustomBusinessDay(weekmask=traded_weekdays, holidays=holidays)
 
 
 def compute_forward_returns(factor,
@@ -256,18 +289,18 @@ def compute_forward_returns(factor,
             fwdret[mask] = np.nan
 
         #
-        # Find the period length, which will be the column name
-        # Becase the calendar inferred from factor and prices doesn't take
-        # into consideration holidays yet, there could be some non-trading days
-        # in between the trades so we'll test several entries to find out the
-        # correct period length
+        # Find the period length, which will be the column name. We'll test
+        # several entries in order to find out the correct period length as
+        # there could be non-trading days which would make the computation
+        # wrong if made only one test
         #
-        entries_to_test = min(10, len(fwdret.index), len(prices.index)-period)
+        entries_to_test = min(30, len(fwdret.index),
+                              len(prices.index) - period)
         days_diffs = []
         for i in range(entries_to_test):
             p_idx = prices.index.get_loc(fwdret.index[i])
             start = prices.index[p_idx]
-            end = prices.index[p_idx+period]
+            end = prices.index[p_idx + period]
             period_len = diff_custom_calendar_timedeltas(start, end, freq)
             days_diffs.append(period_len.components.days)
 
@@ -364,7 +397,8 @@ def get_clean_factor(factor,
                      quantiles=5,
                      bins=None,
                      groupby_labels=None,
-                     max_loss=0.35):
+                     max_loss=0.35,
+                     zero_aware=False):
     """
     Formats the factor data, forward return data, and group mappings into a
     DataFrame that contains aligned MultiIndex indices of timestamp and asset.
@@ -456,6 +490,11 @@ def get_clean_factor(factor,
         forward returns for all factor values, or because it is not possible
         to perform binning.
         Set max_loss=0 to avoid Exceptions suppression.
+    zero_aware : bool, optional
+        If True, compute quantile buckets separately for positive and negative
+        signal values. This is useful if your signal is centered and zero is
+        the separation between long and short signals, respectively.
+        'quantiles' is None.
 
     Returns
     -------
@@ -533,7 +572,8 @@ def get_clean_factor(factor,
                                                      quantiles,
                                                      bins,
                                                      binning_by_group,
-                                                     no_raise)
+                                                     no_raise,
+                                                     zero_aware)
 
     merged_data = merged_data.dropna()
 
@@ -558,49 +598,6 @@ def get_clean_factor(factor,
     return merged_data
 
 
-def get_clean_factor_and_forward_returns_api_change_warning(func):
-    """
-    Decorator used to help API transition: maintain the function backward
-    compatible and warn the user about the API change.
-    Old API:
-        get_clean_factor_and_forward_returns(factor,
-                                             prices,
-                                             groupby=None,
-                                             by_group=False,
-                                             quantiles=5,
-                                             bins=None,
-                                             periods=(1, 5, 10),
-                                             filter_zscore=20,
-                                             groupby_labels=None,
-                                             max_loss=0.25)
-    New API:
-        get_clean_factor_and_forward_returns(factor,
-                                             prices,
-                                             groupby=None,
-                                             binning_by_group=False,
-                                             quantiles=5,
-                                             bins=None,
-                                             periods=(1, 5, 10),
-                                             filter_zscore=20,
-                                             groupby_labels=None,
-                                             max_loss=0.25)
-
-    Eventually this function can be deleted
-    """
-    @wraps(func)
-    def call_w_context(*args, **kwargs):
-        by_group = kwargs.pop('by_group', None)
-        if by_group is not None:
-            kwargs['binning_by_group'] = by_group
-            warnings.warn("get_clean_factor_and_forward_returns: "
-                          "'by_group' argument is now deprecated and "
-                          "replaced by 'binning_by_group'",
-                          category=DeprecationWarning, stacklevel=3)
-        return func(*args, **kwargs)
-    return call_w_context
-
-
-@get_clean_factor_and_forward_returns_api_change_warning
 def get_clean_factor_and_forward_returns(factor,
                                          prices,
                                          groupby=None,
@@ -610,7 +607,8 @@ def get_clean_factor_and_forward_returns(factor,
                                          periods=(1, 5, 10),
                                          filter_zscore=20,
                                          groupby_labels=None,
-                                         max_loss=0.35):
+                                         max_loss=0.35,
+                                         zero_aware=False):
     """
     Formats the factor data, pricing data, and group mappings into a DataFrame
     that contains aligned MultiIndex indices of timestamp and asset. The
@@ -716,6 +714,10 @@ def get_clean_factor_and_forward_returns(factor,
         forward returns for all factor values, or because it is not possible
         to perform binning.
         Set max_loss=0 to avoid Exceptions suppression.
+    zero_aware : bool, optional
+        If True, compute quantile buckets separately for positive and negative
+        signal values. This is useful if your signal is centered and zero is
+        the separation between long and short signals, respectively.
 
     Returns
     -------
@@ -755,7 +757,7 @@ def get_clean_factor_and_forward_returns(factor,
                                    groupby_labels=groupby_labels,
                                    quantiles=quantiles, bins=bins,
                                    binning_by_group=binning_by_group,
-                                   max_loss=max_loss)
+                                   max_loss=max_loss, zero_aware=zero_aware)
 
     return factor_data
 
@@ -865,13 +867,15 @@ def add_custom_calendar_timedelta(input, timedelta, freq):
     ----------
     input : pd.DatetimeIndex or pd.Timestamp
     timedelta : pd.Timedelta
-    freq : DateOffset, optional
+    freq : pd.DataOffset (CustomBusinessDay, Day or BusinessDay)
 
     Returns
     -------
     pd.DatetimeIndex or pd.Timestamp
         input + timedelta
     """
+    if not isinstance(freq, (Day, BusinessDay, CustomBusinessDay)):
+        raise ValueError("freq must be Day, BDay or CustomBusinessDay")
     days = timedelta.components.days
     offset = timedelta - pd.Timedelta(days=days)
     return input + freq * days + offset
@@ -887,14 +891,39 @@ def diff_custom_calendar_timedeltas(start, end, freq):
     ----------
     start : pd.Timestamp
     end : pd.Timestamp
-    freq : DateOffset, optional
+    freq : CustomBusinessDay (see infer_trading_calendar)
+    freq : pd.DataOffset (CustomBusinessDay, Day or BDay)
 
     Returns
     -------
     pd.Timedelta
         end - start
     """
-    actual_days = pd.date_range(start, end, freq=freq).shape[0] - 1
+    if not isinstance(freq, (Day, BusinessDay, CustomBusinessDay)):
+        raise ValueError("freq must be Day, BusinessDay or CustomBusinessDay")
+
+    weekmask = getattr(freq, 'weekmask', None)
+    holidays = getattr(freq, 'holidays', None)
+
+    if weekmask is None and holidays is None:
+        if isinstance(freq, Day):
+            weekmask = 'Mon Tue Wed Thu Fri Sat Sun'
+            holidays = []
+        elif isinstance(freq, BusinessDay):
+            weekmask = 'Mon Tue Wed Thu Fri'
+            holidays = []
+
+    if weekmask is not None and holidays is not None:
+        # we prefer this method as it is faster
+        actual_days = np.busday_count(np.array(start).astype('datetime64[D]'),
+                                      np.array(end).astype('datetime64[D]'),
+                                      weekmask, holidays)
+    else:
+        # default, it is slow
+        actual_days = pd.date_range(start, end, freq=freq).shape[0] - 1
+        if not freq.onOffset(start):
+            actual_days -= 1
+
     timediff = end - start
     delta_days = timediff.components.days - actual_days
     return timediff - pd.Timedelta(days=delta_days)

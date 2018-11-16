@@ -17,9 +17,6 @@
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import pandas as pd
-import warnings
-
-from functools import wraps
 
 from . import plotting
 from . import performance as perf
@@ -59,124 +56,6 @@ class GridFigure(object):
         plt.close(self.fig)
         self.fig = None
         self.gs = None
-
-
-def create_full_tear_sheet_api_change_warning(func):
-    """
-    Decorator used to help API transition: maintain the function backward
-    compatible and warn the user about the API change.
-    Old API:
-        create_full_tear_sheet(factor_data,
-                               long_short=True,
-                               group_adjust=False,
-                               by_group=False)
-    New API:
-        create_full_tear_sheet(factor_data,
-                               long_short=True,
-                               group_neutral=False,
-                               by_group=False)
-
-    Eventually this function can be deleted
-    """
-    @wraps(func)
-    def call_w_context(*args, **kwargs):
-        group_adjust = kwargs.pop('group_adjust', None)
-        if group_adjust is not None:
-            kwargs['group_neutral'] = group_adjust
-            warnings.warn("create_full_tear_sheet: 'group_adjust' argument "
-                          "is now deprecated and replaced by 'group_neutral'",
-                          category=DeprecationWarning, stacklevel=2)
-        return func(*args, **kwargs)
-    return call_w_context
-
-
-def create_information_tear_sheet_api_change_warning(func):
-    """
-    Decorator used to help API transition: maintain the function backward
-    compatible and warn the user about the API change.
-    Old API:
-        create_information_tear_sheet(factor_data,
-                                      group_adjust=False,
-                                      by_group=False)
-    New API:
-        create_information_tear_sheet(factor_data,
-                                      group_neutral=False,
-                                      by_group=False)
-
-    Eventually this function can be deleted
-    """
-    @wraps(func)
-    def call_w_context(*args, **kwargs):
-        group_adjust = kwargs.pop('group_adjust', None)
-        if group_adjust is not None:
-            kwargs['group_neutral'] = group_adjust
-            warnings.warn("create_information_tear_sheet: 'group_adjust' "
-                          "argument is now deprecated and replaced by "
-                          "'group_neutral'",
-                          category=DeprecationWarning, stacklevel=2)
-        return func(*args, **kwargs)
-    return call_w_context
-
-
-def create_returns_tear_sheet_api_change_warning(func):
-    """
-    Decorator used to help API transition: maintain the function backward
-    compatible and warn the user about the API change.
-    Old API:
-        create_returns_tear_sheet(factor_data,
-                                  long_short=True,
-                                  by_group=False)
-    New API:
-        create_returns_tear_sheet(factor_data,
-                                  long_short=True,
-                                  group_neutral=False,
-                                  by_group=False)
-
-    Eventually this function can be deleted
-    """
-    @wraps(func)
-    def call_w_context(*args, **kwargs):
-        if len(args) == 3 and args[2] is True:
-            warnings.warn("create_returns_tear_sheet: a new argument "
-                          "'group_neutral' has been added. Please consider "
-                          "using keyword arguments instead of positional ones "
-                          " to avoid unexpected behaviour.",
-                          category=DeprecationWarning, stacklevel=2)
-        return func(*args, **kwargs)
-    return call_w_context
-
-
-def create_event_returns_tear_sheet_api_change_warning(func):
-    """
-    Decorator used to help API transition: maintain the function backward
-    compatible and warn the user about the API change.
-    Old API:
-        create_event_returns_tear_sheet(factor_data,
-                                        prices,
-                                        avgretplot=(5, 15),
-                                        long_short=True,
-                                        by_group=False)
-    New API:
-        create_event_returns_tear_sheet(factor_data,
-                                        prices,
-                                        avgretplot=(5, 15),
-                                        long_short=True,
-                                        group_neutral=False,
-                                        std_bar=True,
-                                        by_group=False)
-
-    Eventually this function can be deleted
-    """
-    @wraps(func)
-    def call_w_context(*args, **kwargs):
-        if len(args) == 5 and args[4] is True:
-            warnings.warn("create_event_returns_tear_sheet: two new arguments"
-                          " has been added: 'group_neutral' and 'std_bar'. "
-                          "Please consider using keyword arguments instead "
-                          "of positional ones to avoid unexpected behaviour.",
-                          category=DeprecationWarning, stacklevel=2)
-        return func(*args, **kwargs)
-    return call_w_context
 
 
 @plotting.customize
@@ -282,7 +161,6 @@ def create_summary_tear_sheet(factor_data,
     gf.close()
 
 
-@create_returns_tear_sheet_api_change_warning
 @plotting.customize
 def create_returns_tear_sheet(factor_data,
                               long_short=True,
@@ -428,7 +306,6 @@ def create_returns_tear_sheet(factor_data,
         gf.close()
 
 
-@create_information_tear_sheet_api_change_warning
 @plotting.customize
 def create_information_tear_sheet(factor_data,
                                   group_neutral=False,
@@ -537,11 +414,15 @@ def create_turnover_tear_sheet(factor_data, turnover_periods=None):
     gf = GridFigure(rows=vertical_sections, cols=columns_wide)
 
     for period in turnover_periods:
+        if quantile_turnover[period].isnull().all().all():
+            continue
         plotting.plot_top_bottom_quantile_turnover(quantile_turnover[period],
                                                    period=period,
                                                    ax=gf.next_row())
 
     for period in autocorrelation:
+        if autocorrelation[period].isnull().all():
+            continue
         plotting.plot_factor_rank_auto_correlation(autocorrelation[period],
                                                    period=period,
                                                    ax=gf.next_row())
@@ -550,7 +431,6 @@ def create_turnover_tear_sheet(factor_data, turnover_periods=None):
     gf.close()
 
 
-@create_full_tear_sheet_api_change_warning
 @plotting.customize
 def create_full_tear_sheet(factor_data,
                            long_short=True,
@@ -595,7 +475,6 @@ def create_full_tear_sheet(factor_data,
     create_turnover_tear_sheet(factor_data, set_context=False)
 
 
-@create_event_returns_tear_sheet_api_change_warning
 @plotting.customize
 def create_event_returns_tear_sheet(factor_data,
                                     prices,
@@ -700,7 +579,9 @@ def create_event_returns_tear_sheet(factor_data,
 @plotting.customize
 def create_event_study_tear_sheet(factor_data,
                                   prices=None,
-                                  avgretplot=(5, 15)):
+                                  avgretplot=(5, 15),
+                                  rate_of_ret=True,
+                                  n_bars=50):
     """
     Creates an event study tear sheet for analysis of a specific event.
 
@@ -718,6 +599,12 @@ def create_event_study_tear_sheet(factor_data,
     avgretplot: tuple (int, int) - (before, after), optional
         If not None, plot event style average cumulative returns within a
         window (pre and post event).
+    rate_of_ret : bool, optional
+        Display rate of return instead of simple return in 'Mean Period Wise
+        Return By Factor Quantile' and 'Period Wise Return By Factor Quantile'
+        plots
+    n_bars : int, optional
+        Number of bars in event distribution plot
     """
 
     long_short = False
@@ -726,6 +613,7 @@ def create_event_study_tear_sheet(factor_data,
 
     gf = GridFigure(rows=1, cols=1)
     plotting.plot_events_distribution(events=factor_data['factor'],
+                                      num_bars=n_bars,
                                       ax=gf.next_row())
     plt.show()
     gf.close()
@@ -748,20 +636,21 @@ def create_event_study_tear_sheet(factor_data,
         perf.mean_return_by_quantile(factor_data,
                                      by_group=False,
                                      demeaned=long_short)
-    mean_quant_ret = \
-        mean_quant_ret.apply(utils.rate_of_return, axis=0,
-                             base_period=mean_quant_ret.columns[0])
+    if rate_of_ret:
+        mean_quant_ret = \
+            mean_quant_ret.apply(utils.rate_of_return, axis=0,
+                                 base_period=mean_quant_ret.columns[0])
 
     mean_quant_ret_bydate, std_quant_daily = \
         perf.mean_return_by_quantile(factor_data,
                                      by_date=True,
                                      by_group=False,
                                      demeaned=long_short)
-
-    mean_quant_rateret_bydate = mean_quant_ret_bydate.apply(
-        utils.rate_of_return, axis=0,
-        base_period=mean_quant_ret_bydate.columns[0]
-    )
+    if rate_of_ret:
+        mean_quant_ret_bydate = mean_quant_ret_bydate.apply(
+            utils.rate_of_return, axis=0,
+            base_period=mean_quant_ret_bydate.columns[0]
+        )
 
     fr_cols = len(factor_returns.columns)
     vertical_sections = 2 + fr_cols * 1
@@ -772,7 +661,7 @@ def create_event_study_tear_sheet(factor_data,
                                        ylim_percentiles=None,
                                        ax=gf.next_row())
 
-    plotting.plot_quantile_returns_violin(mean_quant_rateret_bydate,
+    plotting.plot_quantile_returns_violin(mean_quant_ret_bydate,
                                           ylim_percentiles=(1, 99),
                                           ax=gf.next_row())
 
